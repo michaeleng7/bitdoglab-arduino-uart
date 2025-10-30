@@ -41,7 +41,6 @@ add_executable(${PROJECT_NAME}
     lib_ssd1306/ssd1306.c
     lib_ssd1306/ssd1306_fonts.c
     lib_ssd1306/ssd1306_bitmaps.c
-    aht10.c
     )
 add_subdirectory(lib/FatFs_SPI)
 
@@ -74,4 +73,6 @@ target_link_libraries(${PROJECT_NAME}
         )
 
 pico_add_extra_outputs(${PROJECT_NAME})
-
+target_link_options(${PROJECT_NAME} PRIVATE
+        -Wl,--print-memory-usage
+        )
