@@ -33,6 +33,19 @@ project(bitdoglab-arduino-uart C CXX ASM)
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
 
+# Adicione antes do add_subdirectory(FreeRTOS-Kernel):
+add_library(freertos_config INTERFACE)
+target_include_directories(freertos_config INTERFACE
+    ${CMAKE_CURRENT_LIST_DIR}/config
+    $<TARGET_PROPERTY:pico_stdlib,INTERFACE_INCLUDE_DIRECTORIES>
+)
+target_compile_definitions(freertos_config INTERFACE
+    projCOVERAGE_TEST=0
+)
+
+set(FREERTOS_PORT GCC_RP2040 CACHE STRING "Port for FreeRTOS")
+add_subdirectory(FreeRTOS-Kernel)
+
 # Add executable. Default name is the project name, version 0.1
 
 add_executable(${PROJECT_NAME} 
@@ -41,6 +54,7 @@ add_executable(${PROJECT_NAME}
     lib_ssd1306/ssd1306.c
     lib_ssd1306/ssd1306_fonts.c
     lib_ssd1306/ssd1306_bitmaps.c
+    FreeRTOS-Kernel/portable/MemMang/heap_4.c
     )
 add_subdirectory(lib/FatFs_SPI)
 
@@ -51,28 +65,32 @@ pico_set_program_version(${PROJECT_NAME} "0.1")
 pico_enable_stdio_uart(${PROJECT_NAME} 1)
 pico_enable_stdio_usb(${PROJECT_NAME} 1)
 
-# Add the standard library to the build
-target_link_libraries(${PROJECT_NAME}
-        pico_stdlib)
-
 # Add the standard include files to the build
 target_include_directories(${PROJECT_NAME} PRIVATE
-        ${CMAKE_CURRENT_LIST_DIR}
+    ${CMAKE_CURRENT_LIST_DIR}
+    ${CMAKE_CURRENT_LIST_DIR}/config
+    ${CMAKE_CURRENT_LIST_DIR}/FreeRTOS-Kernel/include 
+    ${CMAKE_CURRENT_LIST_DIR}/FreeRTOS-Kernel/portable/ThirdParty/GCC/RP2040/include
 )
+
 
 # Add any user requested libraries
 target_link_libraries(${PROJECT_NAME}
-        hardware_spi
-        hardware_i2c
-        hardware_uart
-        pico_stdlib
-        hardware_clocks
-        hardware_dma
-        hardware_rtc
-        FatFs_SPI
-        )
+    pico_stdlib
+    hardware_spi
+    hardware_i2c
+    hardware_uart
+    hardware_clocks
+    hardware_dma
+    hardware_rtc
+    FatFs_SPI
+    pico_sync
+    pico_time
+    freertos_kernel
+    freertos_config
+)
 
 pico_add_extra_outputs(${PROJECT_NAME})
 target_link_options(${PROJECT_NAME} PRIVATE
-        -Wl,--print-memory-usage
-        )
+    -Wl,--print-memory-usage
+    )
