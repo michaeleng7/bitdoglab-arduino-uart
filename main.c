@@ -1,45 +1,69 @@
 /*******************************************************************************
- BitDogLab V7 Final Code - FreeRTOS Implementation
- Target: Raspberry Pi Pico / RP2040
+ BitDogLab V7 Final Code - Stable FreeRTOS, OLED, SD, UART and MQTT Integration
+ Target: Raspberry Pi Pico W / RP2040
+ 
+ NOTE: The global variables and structs are declared in main.h
 *******************************************************************************/
 
-// System and Hardware Includes
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include "pico/stdlib.h"
 #include "hardware/uart.h"
 #include "hardware/spi.h"
 #include "hardware/gpio.h"
 #include "hardware/i2c.h"
 #include "pico/time.h"
+#include "pico/cyw43_arch.h"
+#include "hardware/structs/systick.h"
+#include "lwip/ip4_addr.h"
+#include "lwip/netif.h"
 
-// FreeRTOS Headers
+// FreeRTOS includes
 #include "FreeRTOS.h"
 #include "task.h"
-#include "semphr.h" // For Mutexes
+#include "queue.h"
+#include "semphr.h"
 
-// Includes the FatFs library
+// Includes the FatFs library (SD Card)
 #include "lib/FatFs_SPI/ff15/source/ff.h"
 
 // Include OLED display library
 #include "lib_ssd1306/ssd1306.h"
 #include "lib_ssd1306/ssd1306_fonts.h"
 
+// Project Header (Contains all global definitions, structs, and FreeRTOS defines)
+#include "main.h" 
 
-// --- Configuration Definitions ---
-#define UART_ID uart0
-#define BAUD_RATE 9600
-#define UART_TX_PIN 0
-#define UART_RX_PIN 1
 
-#define I2C_PORT i2c0
-#define I2C_SDA 4
-#define I2C_SCL 5
+// --- Configuration Definitions (Local) ---
+#define UART_ID         uart0
+#define BAUD_RATE       9600
+#define UART_TX_PIN     0
+#define UART_RX_PIN     1
 
-#define LED_RED_PIN 13
-#define LED_GREEN_PIN 11
-#define LED_BLUE_PIN 12
+#define I2C_PORT        i2c0
+#define I2C_SDA_PIN     4  
+#define I2C_SCL_PIN     5  
 
+#define LED_RED_PIN     13 
+#define LED_GREEN_PIN   11 
+#define LED_BLUE_PIN    12 
+
+#define BLINK_INTERVAL_MS 500  // Intervalo de 500ms para o pisca
+
+
+// --- Global Variable Definitions (Defined here, declared 'extern' in main.h) ---
+FATFS fs; 
+FIL fil;  
+
+QueueHandle_t xMqttQueue;       
+SemaphoreHandle_t xOledMutex;   
+SemaphoreHandle_t xStateMutex; 
+
+char current_pir_status[32] = "NO MOTION";
+char current_uid[16] = "NONE";
+char current_status[32] = "SYSTEM READY";
 
 // --- Authorized UIDs ---
 const char *AUTHORIZED_UIDS[] = {
@@ -48,325 +72,553 @@ const char *AUTHORIZED_UIDS[] = {
 };
 const int NUM_AUTHORIZED_UIDS = 2;
 
+// Variáveis globais para estatísticas
+TagStats_t tag_history[MAX_TAG_HISTORY] = {0};
+int num_tags_tracked = 0;
 
-// --- Global Variables (Protected Shared State) ---
-FATFS fs; // File system object
-FIL fil;  // File object
-
-// State variables for the OLED and system status
-char current_status[32] = "INITIALIZING...";
-char last_uid[16] = "NONE";
-char pir_current_state[32] = "NO MOTION"; 
-
-// Mutex to protect access to global state variables
-SemaphoreHandle_t xStateMutex;
+static bool led_blink_state = false;
 
 
-// --- Function Prototypes ---
-void set_rgb_color(int r, int g, int b);
+// --- Function Prototypes for Tasks (These are required for the initial calls) ---
+void init_peripherals(void);
+void initialize_i2c(void);
+void initialize_oled(void);
+void initialize_uart(void);
 void initialize_sd(void);
-void log_event(const char* event_type, const char* message);
-void log_access_event(const char* uid, const char* status);
-void log_pir_event(const char* status);
 void display_status(void);
-
-// --- FreeRTOS Tasks Prototypes ---
 void vUartReaderTask(void *pvParameters);
 void vDisplayUpdaterTask(void *pvParameters);
+void vWifiConnectTask(void *pvParameters);
+extern void vMqttPublisherTask(void *pvParameters); 
 
 
-// --- Helper Functions ---
+// --- Helper Functions Implementation ---
 
 /**
- * @brief Controls the RGB LED color.
+ * @brief Controls the onboard RGB LED color.
  */
 void set_rgb_color(int r, int g, int b) {
-    gpio_put(LED_RED_PIN, r);
-    gpio_put(LED_GREEN_PIN, g);
-    gpio_put(LED_BLUE_PIN, b);
+    gpio_put(LED_RED_PIN, r);     // 1 = LED aceso, 0 = LED apagado
+    gpio_put(LED_GREEN_PIN, g);   // Lógica direta como no código antigo
+    gpio_put(LED_BLUE_PIN, b);    // Sem inversão
 }
 
 /**
- * @brief Initializes the SD card and mounts the file system.
+ * @brief Initializes the I2C peripheral for the OLED display.
  */
-void initialize_sd(void) {
-    FRESULT fr = f_mount(&fs, "", 1);
-    
-    // Acquire mutex before writing to shared state
-    if (xSemaphoreTake(xStateMutex, portMAX_DELAY) == pdTRUE) {
-        if (fr != FR_OK) {
-            printf("Failed to mount SD card: %d\n", fr);
-            strcpy(current_status, "SD CARD ERROR");
-            set_rgb_color(1, 0, 0); 
-        } else {
-            printf("SD card mounted successfully.\n");
-            strcpy(current_status, "SYSTEM READY");
-        }
-        xSemaphoreGive(xStateMutex);
-    }
+void initialize_i2c(void) {
+    i2c_init(I2C_PORT, 400 * 1000);
+    gpio_set_function(I2C_SDA_PIN, GPIO_FUNC_I2C);
+    gpio_set_function(I2C_SCL_PIN, GPIO_FUNC_I2C);
+    gpio_pull_up(I2C_SDA_PIN);
+    gpio_pull_up(I2C_SCL_PIN);
 }
 
 /**
- * @brief Records data in the log file (log.txt).
+ * @brief Initializes the OLED display.
  */
-void log_event(const char* event_type, const char* message) {
-    // NOTE: FatFs operations are blocking and can take time, 
-    // but we keep them here for direct translation.
-    FRESULT fr = f_open(&fil, "log.txt", FA_OPEN_APPEND | FA_WRITE);
-    if (fr == FR_OK) {
-        uint64_t current_time_ms = to_ms_since_boot(get_absolute_time());
-        unsigned long minutes = current_time_ms / 60000;
-        unsigned long seconds = (current_time_ms / 1000) % 60;
-
-        f_printf(&fil, "[%02lu:%02lu] %s: %s\n", 
-            minutes, seconds, event_type, message);
-        f_close(&fil);
-    } else {
-        printf("Failed to open file for writing: %d\n", fr);
-    }
-}
-
-/**
- * @brief Registers access events (RFID).
- */
-void log_access_event(const char* uid, const char* status) {
-    char access_str[50];
-    snprintf(access_str, sizeof(access_str), "UID=%s, Status=%s", uid, status);
-    log_event("RFID_ACCESS", access_str);
-}
-
-/**
- * @brief Registers PIR events.
- */
-void log_pir_event(const char* status) {
-    log_event("PIR_STATUS", status);
-}
-
-
-/**
- * @brief Updates OLED display with current status.
- * This function accesses global variables and MUST acquire the Mutex.
- */
-void display_status(void) {
-    char buffer[32];
-    char local_status[32], local_uid[16], local_pir_state[32];
-
-    // Acquire mutex to safely read shared state
-    if (xSemaphoreTake(xStateMutex, portMAX_DELAY) == pdTRUE) {
-        strncpy(local_status, current_status, 31);
-        strncpy(local_uid, last_uid, 15);
-        strncpy(local_pir_state, pir_current_state, 31);
-        local_status[31] = '\0';
-        local_uid[15] = '\0';
-        local_pir_state[31] = '\0';
-        xSemaphoreGive(xStateMutex); // Release mutex immediately after copying
-    } else {
-        // Handle mutex acquisition failure if necessary
-        return; 
-    }
-
+void initialize_oled(void) {
+    ssd1306_Init(); 
     ssd1306_Fill(Black);
-    
-    // Line 1: Header
-    ssd1306_SetCursor(0, 0);
-    ssd1306_WriteString("ACCESS MONITOR HUB", Font_6x8, White);
-
-    // Line 2: Last UID read
-    ssd1306_SetCursor(0, 16);
-    snprintf(buffer, sizeof(buffer), "UID: %s", local_uid);
-    ssd1306_WriteString(buffer, Font_6x8, White);
-
-    // Line 3: PIR State
-    ssd1306_SetCursor(0, 32);
-    snprintf(buffer, sizeof(buffer), "PIR: %s", local_pir_state);
-    ssd1306_WriteString(buffer, Font_6x8, White);
-    
-    // Line 4: Main Access/System Status
-    ssd1306_SetCursor(0, 48);
-    ssd1306_WriteString(local_status, Font_6x8, White); 
-
     ssd1306_UpdateScreen();
 }
 
-
-// ===================================================================
-// === FREERTOS TASKS IMPLEMENTATION ===
-// ===================================================================
-
 /**
- * @brief Task responsible for reading UART data (RFID/PIR) and processing logic.
- * High Priority (2) ensures quick response to incoming data.
+ * @brief Initializes the UART peripheral.
  */
-void vUartReaderTask(void *pvParameters) {
-    
-    char buffer[50];
-    int idx = 0;
-    
-    // Initialization: Must happen before the loop for the Task to work.
+void initialize_uart(void) {
     uart_init(UART_ID, BAUD_RATE);
     gpio_set_function(UART_TX_PIN, GPIO_FUNC_UART);
     gpio_set_function(UART_RX_PIN, GPIO_FUNC_UART);
-
-    while (1) {
-        
-        // Check data from UART (RFID tag or PIR status)
-        if (uart_is_readable(UART_ID)) {
-            char c = uart_getc(UART_ID);
-            
-            if (c == '\n' || c == '\r') {
-                buffer[idx] = '\0';
-                
-                if (idx > 0) {
-                    
-                    // 1. Check for PIR status (e.g., PIR_STATUS:MOTION_DETECTED_RFID_ACTIVATED)
-                    if (strstr(buffer, "PIR_STATUS:") != NULL) {
-                        
-                        char *status_message = buffer + strlen("PIR_STATUS:");
-                        printf("Received PIR Status: %s\n", status_message);
-                        log_pir_event(status_message);
-                        
-                        // Acquire mutex to safely update shared state
-                        if (xSemaphoreTake(xStateMutex, portMAX_DELAY) == pdTRUE) {
-                            if (strstr(status_message, "ACTIVATED") != NULL) {
-                               strcpy(pir_current_state, "ACTIVE");
-                               strcpy(current_status, "Awaiting Tag");
-                            } else if (strstr(status_message, "SLEEP") != NULL) {
-                               strcpy(pir_current_state, "IDLE"); // IDLE = NO MOTION, RFID SLEEP
-                               strcpy(current_status, "Awaiting Motion");
-                            } else {
-                               strcpy(pir_current_state, status_message);
-                            }
-                            xSemaphoreGive(xStateMutex);
-                        }
-                        
-                        // Flash blue for PIR detection (immediate feedback)
-                        set_rgb_color(0, 0, 1);
-                        vTaskDelay(pdMS_TO_TICKS(50));
-                        set_rgb_color(0, 0, 0); 
-                        
-                    } 
-                    // 2. Check for RFID UID (e.g., RFID_UID:b4067e05)
-                    else if (strstr(buffer, "RFID_UID:") != NULL) {
-                        
-                        char *uid_str = buffer + strlen("RFID_UID:");
-                        printf("Received UID: %s\n", uid_str);
-                        
-                        // Update last UID globally (Protected Write)
-                        if (xSemaphoreTake(xStateMutex, portMAX_DELAY) == pdTRUE) {
-                            strncpy(last_uid, uid_str, sizeof(last_uid) - 1);
-                            last_uid[sizeof(last_uid) - 1] = '\0';
-                            xSemaphoreGive(xStateMutex);
-                        }
-                        
-                        int access_granted = 0;
-                        for (int i = 0; i < NUM_AUTHORIZED_UIDS; i++) {
-                            if (strcmp(uid_str, AUTHORIZED_UIDS[i]) == 0) {
-                                access_granted = 1;
-                                break;
-                            }
-                        }
-                        
-                        // Update status and LED (Protected Write)
-                        if (xSemaphoreTake(xStateMutex, portMAX_DELAY) == pdTRUE) {
-                            if (access_granted) {
-                                printf("Access Granted!\n");
-                                log_access_event(uid_str, "GRANTED"); 
-                                strcpy(current_status, "ACCESS GRANTED"); 
-                                set_rgb_color(0, 1, 0); // Green
-                                vTaskDelay(pdMS_TO_TICKS(2000)); // Non-blocking delay for the Task
-                                set_rgb_color(0, 0, 0); 
-                            } else {
-                                printf("Access Denied!\n");
-                                log_access_event(uid_str, "DENIED"); 
-                                strcpy(current_status, "ACCESS DENIED"); 
-                                set_rgb_color(1, 0, 0); // Red
-                                vTaskDelay(pdMS_TO_TICKS(2000)); // Non-blocking delay for the Task
-                                set_rgb_color(0, 0, 0); 
-                            }
-                            xSemaphoreGive(xStateMutex);
-                        }
-                    }
-                }
-                idx = 0;
-            } else {
-                if (idx < 49) {
-                    buffer[idx++] = c;
-                }
-            }
-        }
-        
-        // Mandatory delay to yield processing time to other tasks
-        vTaskDelay(pdMS_TO_TICKS(1)); 
-    }
 }
-
 
 /**
- * @brief Task responsible for periodically updating the OLED display.
- * Low Priority (1) since it's a cosmetic function.
+ * @brief Initializes all necessary hardware peripherals.
  */
-void vDisplayUpdaterTask(void *pvParameters) {
-    
-    // Initialization: Must happen before the loop for the Task to work.
-    i2c_init(I2C_PORT, 100 * 1000); 
-    gpio_set_function(I2C_SDA, GPIO_FUNC_I2C);
-    gpio_set_function(I2C_SCL, GPIO_FUNC_I2C);
-    gpio_pull_up(I2C_SDA);
-    gpio_pull_up(I2C_SCL);
-    ssd1306_Init();
-    
-    while(1) {
-        display_status();
-        
-        // Update display every 250ms (non-blocking delay)
-        vTaskDelay(pdMS_TO_TICKS(250)); 
-    }
-}
-
-
-// ===================================================================
-// === MAIN ENTRY POINT ===
-// ===================================================================
-
-int main() {
-    stdio_init_all();
-
-    // --- 1. GPIO Initialization (LEDs) ---
+void init_peripherals() {
+    // Initialize RGB LED pins
     gpio_init(LED_RED_PIN);
     gpio_init(LED_GREEN_PIN);
     gpio_init(LED_BLUE_PIN);
     gpio_set_dir(LED_RED_PIN, GPIO_OUT);
     gpio_set_dir(LED_GREEN_PIN, GPIO_OUT);
     gpio_set_dir(LED_BLUE_PIN, GPIO_OUT);
+    set_rgb_color(0, 0, 0); 
     
-    // --- 2. Create Mutex for Shared State Protection ---
-    xStateMutex = xSemaphoreCreateMutex();
+    // Initialize I2C and UART
+    initialize_uart();
+    initialize_i2c();
+}
 
-    if (xStateMutex != NULL) {
-        
-        // --- 3. SD Card Initialization (Requires Mutex to update global status) ---
-        initialize_sd();
+/**
+ * @brief Initializes and mounts the SD card using FatFs.
+ */
+void initialize_sd(void) {
+    FRESULT fr = f_mount(&fs, "0:", 1);
 
-        printf("BitDogLab: FreeRTOS Initializing. Waiting for Arduino data...\n");
+    if (xSemaphoreTake(xStateMutex, portMAX_DELAY) == pdTRUE) {
+        if (fr == FR_OK) {
+            printf("SD Card: Sistema de arquivos montado com sucesso.\n");
+            
+            // Tenta criar um log inicial
+            log_event("SYSTEM", "Sistema inicializado");
+            
+            if (strcmp(current_status, "SYSTEM INIT") == 0) {
+                strcpy(current_status, "SYSTEM READY");
+            }
+        } else {
+            printf("SD Card: Falha ao montar sistema de arquivos. Erro: %d\n", fr);
+            strcpy(current_status, "SD CARD ERROR");
+            set_rgb_color(1, 0, 0);
+        }
+        xSemaphoreGive(xStateMutex);
+    }
+}
+
+/**
+ * @brief Função helper para obter timestamp
+ */
+void get_timestamp(char* buffer, size_t size) {
+    time_t now;
+    time(&now);
+    strftime(buffer, size, "%Y-%m-%d %H:%M:%S", localtime(&now));
+}
+
+/**
+ * @brief Records data in the log file (ACCESS.LOG/PIR.LOG).
+ * (Placeholder for actual logging logic)
+ */
+void log_event(const char* event_type, const char* message) {
+    char timestamp[32];
+    get_timestamp(timestamp, sizeof(timestamp));
+    
+    if (f_mount(&fs, "0:", 1) == FR_OK) {
+        FRESULT fr;
+        FIL file;
         
-        // --- 4. Create Tasks ---
+        fr = f_open(&file, "system.log", FA_WRITE | FA_OPEN_APPEND | FA_OPEN_ALWAYS);
+        if (fr == FR_OK) {
+            char log_line[256];
+            snprintf(log_line, sizeof(log_line), "[%s] %s: %s\n", 
+                    timestamp, event_type, message);
+            
+            unsigned int bw;
+            f_write(&file, log_line, strlen(log_line), &bw);
+            f_sync(&file);
+            f_close(&file);
+            
+            printf("Log salvo: %s", log_line);
+        } else {
+            printf("Erro ao abrir arquivo de log: %d\n", fr);
+        }
         
-        // UART Reader: High Priority (2)
-        xTaskCreate(vUartReaderTask, "UART_Reader", 2048, NULL, 2, NULL); 
-        
-        // Display Updater: Low Priority (1)
-        xTaskCreate(vDisplayUpdaterTask, "OLED_Updater", 1024, NULL, 1, NULL); 
-        
-        // --- 5. Start the FreeRTOS Scheduler ---
-        vTaskStartScheduler();
-        
+        f_mount(0, "0:", 0);
     } else {
-        printf("ERROR: Failed to create Mutex. System Halted.\n");
-        // Loop forever in case of failure
-        while(1) { set_rgb_color(1, 0, 0); sleep_ms(500); set_rgb_color(0, 0, 0); sleep_ms(500); }
+        printf("Erro ao montar sistema de arquivos\n");
+    }
+}
+
+void log_access_event(const char* uid, const char* status) {
+    char message[100];
+    snprintf(message, sizeof(message), "UID: %s - Status: %s", uid, status);
+    log_event("ACCESS", message);
+}
+
+void log_pir_event(const char* status) {
+    log_event("PIR", status);
+}
+
+bool is_uid_authorized(const char* uid) {
+    for(int i = 0; i < NUM_AUTHORIZED_UIDS; i++) {
+        if(strcmp(uid, AUTHORIZED_UIDS[i]) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void update_tag_stats(const char* uid, bool success) {
+    int tag_index = -1;
+    
+    // Procura a tag no histórico
+    for(int i = 0; i < num_tags_tracked; i++) {
+        if(strcmp(uid, tag_history[i].uid) == 0) {
+            tag_index = i;
+            break;
+        }
+    }
+    
+    // Se é uma nova tag e ainda há espaço
+    if(tag_index == -1 && num_tags_tracked < MAX_TAG_HISTORY) {
+        tag_index = num_tags_tracked++;
+        strncpy(tag_history[tag_index].uid, uid, 15);
+        tag_history[tag_index].uid[15] = '\0';
+    }
+    
+    // Atualiza estatísticas se encontrou ou criou a tag
+    if(tag_index >= 0) {
+        TagStats_t* stats = &tag_history[tag_index];
+        TickType_t current_time = xTaskGetTickCount();
+        
+        stats->read_attempts++;
+        if(success) {
+            stats->successful_reads++;
+            stats->consecutive_fails = 0;
+        } else {
+            stats->consecutive_fails++;
+        }
+        stats->last_read_time = current_time;
+        
+        // Imprime estatísticas atualizadas
+        printf("\n=== Estatísticas da Tag %s ===\n", uid);
+        printf("Tentativas totais: %lu\n", stats->read_attempts);
+        printf("Leituras com sucesso: %lu (%.1f%%)\n", 
+               stats->successful_reads,
+               (float)stats->successful_reads * 100 / stats->read_attempts);
+        printf("Falhas consecutivas: %lu\n", stats->consecutive_fails);
+        printf("=============================\n\n");
+    }
+}
+
+void toggle_blue_led(void) {
+    led_blink_state = !led_blink_state;
+    set_rgb_color(0, 0, led_blink_state ? 1 : 0); // Lógica direta
+}
+
+/**
+ * @brief Updates the OLED display with the current system status.
+ */
+void vDisplayUpdaterTask(void *pvParameters) {
+    (void) pvParameters;
+    const TickType_t xDisplayDelay = pdMS_TO_TICKS(100); // Mudado de 250 para 100ms
+
+    // Get local references to font structures
+    const SSD1306_Font_t font_small = Font_6x8;
+    const SSD1306_Font_t font_large = Font_11x18; 
+
+    // --- 1. OLED Initialization (Must acquire Mutex) ---
+    // Initialize I2C is done in init_peripherals(), but OLED init is done here 
+    if (xSemaphoreTake(xOledMutex, portMAX_DELAY) == pdPASS) { 
+        initialize_oled(); 
+        xSemaphoreGive(xOledMutex);
+    }
+    
+    while (true) {
+        // 1. Update display with current status
+        display_status();
+        
+        // 2. Task delay 
+        vTaskDelay(xDisplayDelay);
+    }
+}
+
+/**
+ * @brief Draws the current system status to the OLED display.
+ */
+void display_status(void) {
+    // Get local references to font structures
+    const SSD1306_Font_t font_small = Font_6x8;
+    const SSD1306_Font_t font_large = Font_11x18; 
+
+    char local_status[32], local_uid[16], local_pir_state[32];
+    char wifi_status[16]; // Buffer for Wi-Fi status
+    
+    // 1. Acquire State Mutex to safely read global state variables
+    if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(10)) == pdPASS) {
+        strncpy(local_status, current_status, 31);
+        strncpy(local_uid, current_uid, 15);
+        strncpy(local_pir_state, current_pir_status, 31);
+        local_status[31] = '\0';
+        local_uid[15] = '\0';
+        local_pir_state[31] = '\0';
+        
+        // Adiciona debug no serial
+        printf("Status Atual: %s | UID: %s | PIR: %s\n", 
+               local_status, local_uid, local_pir_state);
+        
+        xSemaphoreGive(xStateMutex);
+    } else {
+        // Cannot read state, use placeholders
+        strcpy(local_status, "LOCK FAIL");
+        strcpy(local_uid, "N/A");
+    }
+    
+    // 2. Check Wi-Fi status (usando apenas cyw43_tcpip_link_status)
+    if (cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA) == CYW43_LINK_UP) {
+        sprintf(wifi_status, "Connected");
+    } else {
+        sprintf(wifi_status, "Disconnected");
     }
 
-    // The code should never reach here (Scheduler takes over)
-    for (;;) {} 
+    // 3. Draw display buffer (Acquire OLED Mutex for drawing)
+    if (xSemaphoreTake(xOledMutex, pdMS_TO_TICKS(50)) == pdPASS) {
+        ssd1306_Fill(Black);
+
+        // Line 1: Header
+        ssd1306_SetCursor(0, 0); 
+        ssd1306_WriteString("ACCESS MONITOR HUB", font_small, White);
+
+        // Line 2: PIR Status
+        ssd1306_SetCursor(0, 10);
+        ssd1306_WriteString("PIR:", font_small, White);
+        ssd1306_SetCursor(30, 10);
+        ssd1306_WriteString(local_pir_state, font_small, White);
+
+        // Line 3: UID
+        ssd1306_SetCursor(0, 20);
+        ssd1306_WriteString("UID:", font_small, White);
+        ssd1306_SetCursor(30, 20);
+        ssd1306_WriteString(local_uid, font_small, White);
+        
+        // Line 4: Main Access/System Status (alterado para mostrar status do sistema, não do WiFi)
+        ssd1306_SetCursor(0, 35);
+        ssd1306_WriteString("STATUS:", font_small, White);
+        ssd1306_SetCursor(45, 35);
+        
+        // Aqui vamos mostrar o status do sistema, não o status do WiFi
+        char system_status[32];
+        if (strcmp(current_uid, "NONE") == 0) {
+            strcpy(system_status, "WAITING TAG");
+        } else {
+            strcpy(system_status, "TAG DETECTED");
+        }
+        ssd1306_WriteString(system_status, font_small, White);
+        
+        // Line 5: Wi-Fi Status (mantido como está)
+        ssd1306_SetCursor(0, 50);
+        ssd1306_WriteString("WIFI:", font_small, White);
+        ssd1306_SetCursor(30, 50);
+        ssd1306_WriteString(wifi_status, font_small, White);
+        
+        ssd1306_UpdateScreen();
+        xSemaphoreGive(xOledMutex); // Release OLED Mutex
+    }
+}
+
+/**
+ * @brief Task for reading serial data from the Arduino Hub (PIR/RFID).
+ */
+void vUartReaderTask(void *pvParameters) {
+    (void) pvParameters;
+    const TickType_t xUartDelay = pdMS_TO_TICKS(20);
+    const TickType_t xUidClearDelay = pdMS_TO_TICKS(3000); // 3 segundos para limpar o UID
+    char rx_buffer[256] = {0};
+    int rx_index = 0;
+    TickType_t xLastUidTime = 0;  // Armazena quando foi a última leitura de UID
+    bool uidPresent = false;      // Flag para controlar se há UID presente
+    
+    printf("UART_Reader: Task iniciada.\n");
+
+    while (true) {
+        // Verifica se é hora de limpar o UID
+        if (uidPresent && (xTaskGetTickCount() - xLastUidTime > xUidClearDelay)) {
+            if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                strcpy(current_uid, "NONE");
+                uidPresent = false;
+                printf("UID limpo após timeout\n");
+                xSemaphoreGive(xStateMutex);
+            }
+        }
+
+        while (uart_is_readable(UART_ID)) {
+            char ch = uart_getc(UART_ID);
+            
+            if (ch != '\n' && ch != '\r') {
+                rx_buffer[rx_index++] = ch;
+                if (rx_index >= sizeof(rx_buffer) - 1) {
+                    rx_index = 0;
+                }
+            } 
+            else if (rx_index > 0) {
+                rx_buffer[rx_index] = '\0';
+                printf("UART Recebido: %s\n", rx_buffer);
+                
+                if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                    if (strstr(rx_buffer, "PIR_STATUS:MOTION_DETECTED")) {
+                        strcpy(current_pir_status, "MOTION DETECTED");
+                        toggle_blue_led();  // Inicia piscando
+                        log_pir_event("MOTION DETECTED");
+                    } 
+                    else if (strstr(rx_buffer, "PIR_STATUS:NO_MOTION")) {
+                        strcpy(current_pir_status, "NO MOTION");
+                        set_rgb_color(0, 0, 0);  // Desliga todos os LEDs
+                        log_pir_event("NO MOTION");
+                    }
+                    else if (strstr(rx_buffer, "UID:")) {
+                        char *uid_start = strstr(rx_buffer, "UID:") + 4;
+                        while (*uid_start == ' ') uid_start++;
+                        
+                        // Verifica se passou tempo suficiente desde a última leitura
+                        bool read_allowed = true;
+                        for(int i = 0; i < num_tags_tracked; i++) {
+                            if(strcmp(uid_start, tag_history[i].uid) == 0) {
+                                TickType_t time_since_last = xTaskGetTickCount() - tag_history[i].last_read_time;
+                                if(time_since_last < pdMS_TO_TICKS(TAG_READ_TIMEOUT_MS)) {
+                                    read_allowed = false;
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        if(read_allowed) {
+                            strncpy(current_uid, uid_start, 15);
+                            current_uid[15] = '\0';
+                            xLastUidTime = xTaskGetTickCount();
+                            uidPresent = true;
+                            
+                            // Verifica se a tag é autorizada e configura o LED apropriado
+                            bool authorized = is_uid_authorized(current_uid);
+                            if (authorized) {
+                                set_rgb_color(0, 1, 0);  // Verde para acesso autorizado
+                            } else {
+                                set_rgb_color(1, 0, 0);  // Vermelho para acesso negado
+                            }
+                            
+                            // Adiciona log de acesso
+                            log_access_event(current_uid, 
+                                is_uid_authorized(current_uid) ? "AUTHORIZED" : "UNAUTHORIZED");
+                            
+                            // Atualiza estatísticas
+                            update_tag_stats(current_uid, true);
+                            
+                            printf("Nova UID detectada: %s (será limpa em 3 segundos)\n", current_uid);
+                        } else {
+                            // Atualiza estatísticas como falha (leitura muito rápida)
+                            update_tag_stats(uid_start, false);
+                            printf("Leitura ignorada - muito rápida para a mesma tag\n");
+                        }
+                    }
+                    
+                    xSemaphoreGive(xStateMutex);
+                }
+                
+                rx_index = 0;
+                vTaskDelay(pdMS_TO_TICKS(50));
+            }
+        }
+        
+        vTaskDelay(xUartDelay);
+    }
+}
+
+/**
+ * @brief Task for initial Wi-Fi connection and launching the MQTT task.
+ */
+void vWifiConnectTask(void *pvParameters) {
+    (void) pvParameters;
+    const TickType_t xWifiRetryDelay = pdMS_TO_TICKS(5000); // 5 segundos entre tentativas
+    int retry_count = 0;
+    bool mqtt_task_created = false;
+    
+    printf("Wi-Fi_Connect: Initializing Wi-Fi...\n");
+
+    while (true) {
+        // Verifica status usando cyw43_tcpip_link_status ao invés de cyw43_is_connected
+        if (cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA) != CYW43_LINK_UP) {
+            printf("Wi-Fi_Connect: Tentativa %d de conexão Wi-Fi (SSID: %s)...\n", ++retry_count, WIFI_SSID);
+            
+            if (xSemaphoreTake(xStateMutex, portMAX_DELAY) == pdPASS) {
+                strcpy(current_status, "CONNECTING WIFI");
+                xSemaphoreGive(xStateMutex);
+            }
+            
+            cyw43_arch_enable_sta_mode();
+            
+            if (cyw43_arch_wifi_connect_timeout_ms(WIFI_SSID, WIFI_PASSWORD, 
+                CYW43_AUTH_WPA2_AES_PSK, 10000)) {
+                
+                printf("Wi-Fi_Connect: Falha na conexão.\n");
+                if (xSemaphoreTake(xStateMutex, portMAX_DELAY) == pdPASS) {
+                    strcpy(current_status, "WIFI CONNECT FAILED");
+                    xSemaphoreGive(xStateMutex);
+                }
+            } else {
+                printf("Wi-Fi_Connect: Conectado com sucesso!\n");
+                if (xSemaphoreTake(xStateMutex, portMAX_DELAY) == pdPASS) {
+                    strcpy(current_status, "WIFI CONNECTED");
+                    xSemaphoreGive(xStateMutex);
+                }
+                
+                // Cria a task MQTT apenas na primeira conexão bem-sucedida
+                if (!mqtt_task_created) {
+                    xTaskCreate(vMqttPublisherTask, "MQTT_Publisher", 4096, NULL, 4, NULL);
+                    mqtt_task_created = true;
+                }
+            }
+        }
+        
+        vTaskDelay(xWifiRetryDelay);
+    }
+}
+
+// ===================================================================
+// === MAIN ENTRY POINT (Program Start) ===
+// ===================================================================
+
+int main() {
+    stdio_init_all();
+
+    // 1. Initialize non-FreeRTOS peripherals (GPIO, I2C, UART)
+    init_peripherals();
+    
+    // 2. Initialize Pico W Wi-Fi Arch (Must be done before any network calls)
+    if (cyw43_arch_init() != 0) {
+        printf("ERROR: CYW43 Wi-Fi Arch initialization failed. Stopping.\n");
+        return 1;
+    }
+    printf("BitDogLab: FreeRTOS/Wi-Fi Initializing...\n");
+
+    // 3. Create FreeRTOS objects (Mutexes and Queue)
+    xStateMutex = xSemaphoreCreateMutex(); // Mutex for shared status
+    xOledMutex = xSemaphoreCreateMutex(); // Mutex for OLED drawing
+    xMqttQueue = xQueueCreate(5, sizeof(MqttMessage_t)); 
+
+    if (xStateMutex == NULL || xOledMutex == NULL || xMqttQueue == NULL) {
+        printf("FATAL ERROR: Failed to create FreeRTOS synchronization objects.\n");
+        return 1;
+    }
+    
+    // 4. Initialize SD Card (Runs logic, uses Mutex)
+    initialize_sd();
+    
+    printf("BitDogLab: Starting tasks...\n");
+    
+    // 5. Create Tasks
+    xTaskCreate(vUartReaderTask, "UART_Reader", 2048, NULL, 3, NULL); // Aumentada prioridade
+    xTaskCreate(vDisplayUpdaterTask, "OLED_Updater", 1024, NULL, 1, NULL); 
+    xTaskCreate(vWifiConnectTask, "WIFI_Connect", 2048, NULL, 2, NULL); 
+    // Note: vMqttPublisherTask is created inside vWifiConnectTask
+    
+    // 6. Start the FreeRTOS Scheduler
+    vTaskStartScheduler();
+    
+    // Should never reach here
+    printf("ERROR: Scheduler stopped unexpectedly!\n");
     return 0;
 }
+
+
+// --- Required FreeRTOS Hook Functions (Implementation is required for successful compilation) ---
+
+void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName) {
+    printf("ERROR: Stack Overflow in Task: %s\n", pcTaskName);
+    for(;;);
+}
+
+void vApplicationMallocFailedHook(void) {
+    printf("ERROR: Malloc Failed (FreeRTOS Heap)\n");
+    for(;;);
+}
+
+#if (configSUPPORT_STATIC_ALLOCATION == 1)
+void vApplicationGetIdleTaskMemory( StaticTask_t **ppxIdleTaskTCBBuffer,
+                                    StackType_t **ppxIdleTaskStackBuffer,
+                                    uint32_t *pulIdleTaskStackSize ) {
+    static StaticTask_t xIdleTaskTCB;
+    static StackType_t uxIdleTaskStack[ configMINIMAL_STACK_SIZE ];
+
+    *ppxIdleTaskTCBBuffer = &xIdleTaskTCB;
+    *ppxIdleTaskStackBuffer = uxIdleTaskStack;
+    *pulIdleTaskStackSize = configMINIMAL_STACK_SIZE;
+}
+#endif
