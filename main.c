@@ -50,7 +50,7 @@
 #define LED_GREEN_PIN   11 
 #define LED_BLUE_PIN    12 
 
-#define BLINK_INTERVAL_MS 500  // Intervalo de 500ms para o pisca
+#define BLINK_INTERVAL_MS 500  // 500ms interval for blinking
 
 
 // --- Global Variable Definitions (Defined here, declared 'extern' in main.h) ---
@@ -72,7 +72,7 @@ const char *AUTHORIZED_UIDS[] = {
 };
 const int NUM_AUTHORIZED_UIDS = 2;
 
-// Variáveis globais para estatísticas
+// Global variables for statistics
 TagStats_t tag_history[MAX_TAG_HISTORY] = {0};
 int num_tags_tracked = 0;
 
@@ -98,9 +98,9 @@ extern void vMqttPublisherTask(void *pvParameters);
  * @brief Controls the onboard RGB LED color.
  */
 void set_rgb_color(int r, int g, int b) {
-    gpio_put(LED_RED_PIN, r);     // 1 = LED aceso, 0 = LED apagado
-    gpio_put(LED_GREEN_PIN, g);   // Lógica direta como no código antigo
-    gpio_put(LED_BLUE_PIN, b);    // Sem inversão
+    gpio_put(LED_RED_PIN, r);     // 1 = LED on, 0 = LED off
+    gpio_put(LED_GREEN_PIN, g);   // Straightforward logic, like in the old code.
+    gpio_put(LED_BLUE_PIN, b);    // No inversion
 }
 
 /**
@@ -240,7 +240,7 @@ bool is_uid_authorized(const char* uid) {
 void update_tag_stats(const char* uid, bool success) {
     int tag_index = -1;
     
-    // Procura a tag no histórico
+    // Search for the tag in the history.
     for(int i = 0; i < num_tags_tracked; i++) {
         if(strcmp(uid, tag_history[i].uid) == 0) {
             tag_index = i;
@@ -248,14 +248,14 @@ void update_tag_stats(const char* uid, bool success) {
         }
     }
     
-    // Se é uma nova tag e ainda há espaço
+    // If it's a new tag and there's still space
     if(tag_index == -1 && num_tags_tracked < MAX_TAG_HISTORY) {
         tag_index = num_tags_tracked++;
         strncpy(tag_history[tag_index].uid, uid, 15);
         tag_history[tag_index].uid[15] = '\0';
     }
     
-    // Atualiza estatísticas se encontrou ou criou a tag
+    //Update statistics if you found or created the tag.
     if(tag_index >= 0) {
         TagStats_t* stats = &tag_history[tag_index];
         TickType_t current_time = xTaskGetTickCount();
@@ -269,7 +269,7 @@ void update_tag_stats(const char* uid, bool success) {
         }
         stats->last_read_time = current_time;
         
-        // Imprime estatísticas atualizadas
+        // Print updated statistics.
         printf("\n=== Estatísticas da Tag %s ===\n", uid);
         printf("Tentativas totais: %lu\n", stats->read_attempts);
         printf("Leituras com sucesso: %lu (%.1f%%)\n", 
@@ -332,7 +332,7 @@ void display_status(void) {
         local_uid[15] = '\0';
         local_pir_state[31] = '\0';
         
-        // Adiciona debug no serial
+        // Adds debugging to the serial port.
         printf("Status Atual: %s | UID: %s | PIR: %s\n", 
                local_status, local_uid, local_pir_state);
         
@@ -343,7 +343,7 @@ void display_status(void) {
         strcpy(local_uid, "N/A");
     }
     
-    // 2. Check Wi-Fi status (usando apenas cyw43_tcpip_link_status)
+    // 2. Check Wi-Fi status (using only cyw43_tcpip_link_status)
     if (cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA) == CYW43_LINK_UP) {
         sprintf(wifi_status, "Connected");
     } else {
@@ -370,12 +370,12 @@ void display_status(void) {
         ssd1306_SetCursor(30, 20);
         ssd1306_WriteString(local_uid, font_small, White);
         
-        // Line 4: Main Access/System Status (alterado para mostrar status do sistema, não do WiFi)
+        // Line 4: Main Access/System Status (system status)
         ssd1306_SetCursor(0, 35);
         ssd1306_WriteString("STATUS:", font_small, White);
         ssd1306_SetCursor(45, 35);
         
-        // Aqui vamos mostrar o status do sistema, não o status do WiFi
+        
         char system_status[32];
         if (strcmp(current_uid, "NONE") == 0) {
             strcpy(system_status, "WAITING TAG");
@@ -384,7 +384,7 @@ void display_status(void) {
         }
         ssd1306_WriteString(system_status, font_small, White);
         
-        // Line 5: Wi-Fi Status (mantido como está)
+        // Line 5: Wi-Fi Status
         ssd1306_SetCursor(0, 50);
         ssd1306_WriteString("WIFI:", font_small, White);
         ssd1306_SetCursor(30, 50);
@@ -401,16 +401,16 @@ void display_status(void) {
 void vUartReaderTask(void *pvParameters) {
     (void) pvParameters;
     const TickType_t xUartDelay = pdMS_TO_TICKS(20);
-    const TickType_t xUidClearDelay = pdMS_TO_TICKS(3000); // 3 segundos para limpar o UID
+    const TickType_t xUidClearDelay = pdMS_TO_TICKS(3000); // 3 seconds to clear the UID
     char rx_buffer[256] = {0};
     int rx_index = 0;
-    TickType_t xLastUidTime = 0;  // Armazena quando foi a última leitura de UID
-    bool uidPresent = false;      // Flag para controlar se há UID presente
+    TickType_t xLastUidTime = 0;  // Stores when the last UID was read.
+    bool uidPresent = false;      // Flag to check if a UID is present.
     
     printf("UART_Reader: Task iniciada.\n");
 
     while (true) {
-        // Verifica se é hora de limpar o UID
+        // Check if it's time to clear the UID.
         if (uidPresent && (xTaskGetTickCount() - xLastUidTime > xUidClearDelay)) {
             if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
                 strcpy(current_uid, "NONE");
@@ -436,19 +436,33 @@ void vUartReaderTask(void *pvParameters) {
                 if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
                     if (strstr(rx_buffer, "PIR_STATUS:MOTION_DETECTED")) {
                         strcpy(current_pir_status, "MOTION DETECTED");
-                        toggle_blue_led();  // Inicia piscando
+                        toggle_blue_led();  // Starts blinking
                         log_pir_event("MOTION DETECTED");
-                    } 
+
+                        // Send MQTT message for PIR motion detected
+                        MqttMessage_t mqtt_msg;
+                        strcpy(mqtt_msg.type, "PIR");
+                        strcpy(mqtt_msg.uid, "");
+                        strcpy(mqtt_msg.status, "MOTION_DETECTED");
+                        xQueueSend(xMqttQueue, &mqtt_msg, pdMS_TO_TICKS(100));
+                    }
                     else if (strstr(rx_buffer, "PIR_STATUS:NO_MOTION")) {
                         strcpy(current_pir_status, "NO MOTION");
-                        set_rgb_color(0, 0, 0);  // Desliga todos os LEDs
+                        set_rgb_color(0, 0, 0);  // Turn off all LEDs.
                         log_pir_event("NO MOTION");
+
+                        // Send MQTT message for PIR no motion
+                        MqttMessage_t mqtt_msg;
+                        strcpy(mqtt_msg.type, "PIR");
+                        strcpy(mqtt_msg.uid, "");
+                        strcpy(mqtt_msg.status, "NO_MOTION");
+                        xQueueSend(xMqttQueue, &mqtt_msg, pdMS_TO_TICKS(100));
                     }
                     else if (strstr(rx_buffer, "UID:")) {
                         char *uid_start = strstr(rx_buffer, "UID:") + 4;
                         while (*uid_start == ' ') uid_start++;
-                        
-                        // Verifica se passou tempo suficiente desde a última leitura
+
+                        // Check if enough time has passed since the last reading.
                         bool read_allowed = true;
                         for(int i = 0; i < num_tags_tracked; i++) {
                             if(strcmp(uid_start, tag_history[i].uid) == 0) {
@@ -459,36 +473,43 @@ void vUartReaderTask(void *pvParameters) {
                                 }
                             }
                         }
-                        
+
                         if(read_allowed) {
                             strncpy(current_uid, uid_start, 15);
                             current_uid[15] = '\0';
                             xLastUidTime = xTaskGetTickCount();
                             uidPresent = true;
-                            
-                            // Verifica se a tag é autorizada e configura o LED apropriado
+
+                            // Checks if the tag is authorized and configures the appropriate LED.
                             bool authorized = is_uid_authorized(current_uid);
                             if (authorized) {
-                                set_rgb_color(0, 1, 0);  // Verde para acesso autorizado
+                                set_rgb_color(0, 1, 0);  // Green for authorized access
                             } else {
-                                set_rgb_color(1, 0, 0);  // Vermelho para acesso negado
+                                set_rgb_color(1, 0, 0);  // Red for access denied
                             }
-                            
-                            // Adiciona log de acesso
-                            log_access_event(current_uid, 
+
+                            // Add access log
+                            log_access_event(current_uid,
                                 is_uid_authorized(current_uid) ? "AUTHORIZED" : "UNAUTHORIZED");
-                            
-                            // Atualiza estatísticas
+
+                            // Update statistics
                             update_tag_stats(current_uid, true);
-                            
+
+                            // Send MQTT message for UID access
+                            MqttMessage_t mqtt_msg;
+                            strcpy(mqtt_msg.type, "ACCESS");
+                            strcpy(mqtt_msg.uid, current_uid);
+                            strcpy(mqtt_msg.status, authorized ? "AUTHORIZED" : "UNAUTHORIZED");
+                            xQueueSend(xMqttQueue, &mqtt_msg, pdMS_TO_TICKS(100));
+
                             printf("Nova UID detectada: %s (será limpa em 3 segundos)\n", current_uid);
                         } else {
-                            // Atualiza estatísticas como falha (leitura muito rápida)
+                            // Updates statistics as needed (very fast reading)
                             update_tag_stats(uid_start, false);
                             printf("Leitura ignorada - muito rápida para a mesma tag\n");
                         }
                     }
-                    
+
                     xSemaphoreGive(xStateMutex);
                 }
                 
@@ -513,7 +534,7 @@ void vWifiConnectTask(void *pvParameters) {
     printf("Wi-Fi_Connect: Initializing Wi-Fi...\n");
 
     while (true) {
-        // Verifica status usando cyw43_tcpip_link_status ao invés de cyw43_is_connected
+        // Check status using cyw43_tcpip_link_status
         if (cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA) != CYW43_LINK_UP) {
             printf("Wi-Fi_Connect: Tentativa %d de conexão Wi-Fi (SSID: %s)...\n", ++retry_count, WIFI_SSID);
             
@@ -584,7 +605,7 @@ int main() {
     printf("BitDogLab: Starting tasks...\n");
     
     // 5. Create Tasks
-    xTaskCreate(vUartReaderTask, "UART_Reader", 2048, NULL, 3, NULL); // Aumentada prioridade
+    xTaskCreate(vUartReaderTask, "UART_Reader", 2048, NULL, 3, NULL); // Increased priority
     xTaskCreate(vDisplayUpdaterTask, "OLED_Updater", 1024, NULL, 1, NULL); 
     xTaskCreate(vWifiConnectTask, "WIFI_Connect", 2048, NULL, 2, NULL); 
     // Note: vMqttPublisherTask is created inside vWifiConnectTask

@@ -16,20 +16,24 @@
 #include "semphr.h"
 #include "pico/cyw43_arch.h" // Needed for Wi-Fi defines
 
-// --- Wi-Fi Configuration Constants ---
-// Define the credentials here, accessible by main.c and mqtt_publisher_task.c
+// --- Wi-Fi and MQTT Configuration Constants ---
+// Define the credentials and broker settings here, accessible by main.c and mqtt_publisher_task.c
 #define WIFI_SSID       "MDC" 
 #define WIFI_PASSWORD   "mdc1020304050" 
-#define MQTT_BROKER_IP  "192.168.1.10"
-#define MQTT_PORT       1883
+// Using Hostname for reliable connection (requires DNS implementation)
+#define MQTT_BROKER_IP  "test.mosquitto.org" // Currently using hostname in IP slot (requires DNS)
+#define MQTT_BROKER     "test.mosquitto.org"
 #define MQTT_TOPIC_OUT  "bitdoglab/access/event"
+#define MQTT_CLIENT_ID  "BitDogLab"
+#define MQTT_TOPIC      "bitdoglab/status" // Main publication topic
 // -----------------------------------
 
 
-// Struct for messages sent from UART Task to MQTT Task
+// Structure for MQTT messages
 typedef struct {
-    char event_type[16];   // e.g., "RFID_ACCESS", "PIR_STATUS"
-    char message_data[32]; // e.g., the UID, or the status ("GRANTED", "DENIED", "MOTION")
+    char type[16];    // Event type (ACCESS/PIR)
+    char uid[16];     // Tag UID or identifier
+    char status[32];  // Event status
 } MqttMessage_t;
 
 
@@ -49,7 +53,7 @@ extern char current_status[32];
 extern void set_rgb_color(int r, int g, int b);
 extern void log_access_event(const char* uid, const char* status);
 extern void log_pir_event(const char* status);
-extern void initialize_i2c(void); // Added declaration for helper function
+extern void initialize_i2c(void); // Helper function declaration
 
 // Task Prototypes (Required for xTaskCreate)
 extern void vDisplayUpdaterTask(void *pvParameters);
@@ -57,19 +61,19 @@ extern void vUartReaderTask(void *pvParameters);
 extern void vWifiConnectTask(void *pvParameters);
 extern void vMqttPublisherTask(void *pvParameters);
 
-extern cyw43_t cyw43_state; // Declaração da estrutura global do driver
-extern int cyw43_is_connected(void); // Protótipo necessário para display_status
-extern int cyw43_wifi_link_status(cyw43_t *self, int itf); // Protótipo completo
+extern cyw43_t cyw43_state; // Declaration of the global driver structure
+extern int cyw43_is_connected(void); // Prototype needed for display_status
+extern int cyw43_wifi_link_status(cyw43_t *self, int itf); // Full prototype
 
 extern void set_rgb_color(int r, int g, int b);
 extern void log_access_event(const char* uid, const char* status);
 extern void log_pir_event(const char* status);
 
-// Definições
+// Definitions
 #define MAX_TAG_HISTORY 10
 #define TAG_READ_TIMEOUT_MS 1000
 
-// Estrutura para estatísticas de tag
+// Structure for tag statistics
 typedef struct {
     char uid[16];
     uint32_t read_attempts;
@@ -78,7 +82,7 @@ typedef struct {
     uint32_t consecutive_fails;
 } TagStats_t;
 
-// Protótipos das funções
+// Function Prototypes
 void log_event(const char* event_type, const char* message);
 void log_access_event(const char* uid, const char* status);
 void log_pir_event(const char* status);
@@ -87,7 +91,7 @@ void update_tag_stats(const char* uid, bool success);
 void print_tag_stats(void);
 void toggle_blue_led(void);
 
-// Variáveis externas
+// External Variables
 extern TagStats_t tag_history[MAX_TAG_HISTORY];
 extern int num_tags_tracked;
 extern const char *AUTHORIZED_UIDS[];

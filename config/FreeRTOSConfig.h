@@ -1,8 +1,7 @@
 #ifndef FREERTOS_CONFIG_H
 #define FREERTOS_CONFIG_H
 
-/* Use Pico SDK */
-
+#define configENABLE_MPU                        0
 
 /* Basic configs */
 #define configUSE_PREEMPTION                    1
@@ -54,7 +53,7 @@
 #define configTIMER_QUEUE_LENGTH                10
 #define configTIMER_TASK_STACK_DEPTH           configMINIMAL_STACK_SIZE
 
-/* Define to trap errors during development */
+/* Defines to trap errors during development */
 #define configASSERT( x )                       assert(x)
 
 /* Optional functions */

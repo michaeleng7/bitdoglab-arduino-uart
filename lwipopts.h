@@ -30,7 +30,7 @@
 #define LWIP_SOCKET                 0
 #define LWIP_PROVIDE_ERRNO         1
 
-// Evita que o LwIP redefina as estruturas de sockets que a toolchain (newlib) já definiu
+// It prevents LwIP from redefining socket structures that the toolchain (newlib) has already defined.
 #define LWIP_TIMEVAL_PRIVATE 0
 // --- GENERAL MEMORY AND PERFORMANCE SETTINGS ---
 #define MEM_ALIGNMENT               4

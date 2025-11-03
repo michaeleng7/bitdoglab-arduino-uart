@@ -37,7 +37,7 @@ pico_sdk_init()
 # Configuração do FreeRTOS
 add_library(freertos_config INTERFACE)
 target_include_directories(freertos_config INTERFACE
-    ${CMAKE_CURRENT_LIST_DIR}/config  # Aponta para a pasta config onde está o FreeRTOSConfig.h
+    ${CMAKE_CURRENT_LIST_DIR}/config  # Point to the config folder where FreeRTOSConfig.h is located.
 )
 target_compile_definitions(freertos_config INTERFACE
     projCOVERAGE_TEST=0
@@ -45,7 +45,7 @@ target_compile_definitions(freertos_config INTERFACE
     INCLUDE_xSemaphoreGetMutexHolder=1
 )
 
-# Define a porta do FreeRTOS para RP2040
+# Set the FreeRTOS port to RP2040.
 set(FREERTOS_PORT GCC_RP2040 CACHE STRING "Port for FreeRTOS")
 add_subdirectory(FreeRTOS-Kernel)
 
@@ -81,12 +81,13 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${PICO_SDK_PATH}/src/rp2_common/pico_rand/include
     ${PICO_SDK_PATH}/src/rp2_common/pico_lwip/include
     ${PICO_SDK_PATH}/lib/lwip/src/include
-    ${PICO_SDK_PATH}/lib/cyw43-driver/src                # Adiciona include do driver CYW43
+    ${PICO_SDK_PATH}/lib/lwip/src/include/lwip
+    ${PICO_SDK_PATH}/lib/lwip/src/apps/mqtt    #Adds MQTT inclusion.
+    ${PICO_SDK_PATH}/lib/cyw43-driver/src                # Adds the CYW43 driver inclusion.
     ${PICO_SDK_PATH}/src/rp2_common/pico_cyw43_arch/include
     ${PICO_SDK_PATH}/lib/lwip/contrib/ports/freertos/include
 )
-
-# Remova a definição duplicada de PICO_BOARD do target_compile_definitions
+# Modify definitions of compiler options
 target_compile_definitions(${PROJECT_NAME} PRIVATE
     # Remover PICO_BOARD=pico_w daqui
     CYW43_HOST_NAME="PicoW"
@@ -98,20 +99,22 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
     LWIP_DNS=1
     LWIP_DHCP=1
     CYW43_LWIP=1
+    LWIP_MQTT=1                    # Enables MQTT support.
+    MQTT_OUTPUT_RINGBUF_SIZE=256   # Buffer size for MQTT
 )
 
-# Ajuste a ordem das bibliotecas para resolver as dependências
+# Adjust the order of the libraries to resolve dependencies.
 target_link_libraries(${PROJECT_NAME}
-    # WiFi e rede (ordem é importante!)
+    # WiFi and network (order matters!)
     pico_cyw43_arch_lwip_threadsafe_background
     pico_cyw43_driver
     pico_cyw43_arch
     
-    # Core do sistema
+    # System core
     pico_stdlib
     hardware_adc
     
-    # lwIP e suas dependências
+    # lwIP and its dependencies
     pico_lwip_nosys
     pico_lwip
     
@@ -127,16 +130,17 @@ target_link_libraries(${PROJECT_NAME}
     hardware_dma
     hardware_rtc
     
-    # Utilitários
+    # Utilities
     pico_sync
     pico_time
     pico_rand
     
     # FAT FS
     FatFs_SPI
+    pico_lwip_mqtt
 )
 
-# Modifique as definições do lwIP
+# Modify linker options and extra outputs
 target_compile_definitions(${PROJECT_NAME} PRIVATE
     CYW43_HOST_NAME="PicoW"
     NO_SYS=1
