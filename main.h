@@ -51,9 +51,14 @@ extern char current_status[32];
 
 // --- Function Prototypes used across files ---
 extern void set_rgb_color(int r, int g, int b);
-extern void log_access_event(const char* uid, const char* status);
-extern void log_pir_event(const char* status);
+extern void log_event(const char* event_type, const char* message, const char* external_timestamp);
+extern void log_access_event(const char* uid, const char* status, const char* external_timestamp);
+extern void log_pir_event(const char* status, const char* external_timestamp);
 extern void initialize_i2c(void); // Helper function declaration
+extern bool is_uid_authorized(const char* uid);
+extern void update_tag_stats(const char* uid, bool success);
+extern void print_tag_stats(void);
+extern void toggle_blue_led(void);
 
 // Task Prototypes (Required for xTaskCreate)
 extern void vDisplayUpdaterTask(void *pvParameters);
@@ -64,10 +69,6 @@ extern void vMqttPublisherTask(void *pvParameters);
 extern cyw43_t cyw43_state; // Declaration of the global driver structure
 extern int cyw43_is_connected(void); // Prototype needed for display_status
 extern int cyw43_wifi_link_status(cyw43_t *self, int itf); // Full prototype
-
-extern void set_rgb_color(int r, int g, int b);
-extern void log_access_event(const char* uid, const char* status);
-extern void log_pir_event(const char* status);
 
 // Definitions
 #define MAX_TAG_HISTORY 10
@@ -81,15 +82,6 @@ typedef struct {
     TickType_t last_read_time;
     uint32_t consecutive_fails;
 } TagStats_t;
-
-// Function Prototypes
-void log_event(const char* event_type, const char* message);
-void log_access_event(const char* uid, const char* status);
-void log_pir_event(const char* status);
-bool is_uid_authorized(const char* uid);
-void update_tag_stats(const char* uid, bool success);
-void print_tag_stats(void);
-void toggle_blue_led(void);
 
 // External Variables
 extern TagStats_t tag_history[MAX_TAG_HISTORY];

@@ -16,8 +16,12 @@
 #include "pico/time.h"
 #include "pico/cyw43_arch.h"
 #include "hardware/structs/systick.h"
+
+// Networking/Time Includes
 #include "lwip/ip4_addr.h"
 #include "lwip/netif.h"
+#include "hardware/rtc.h"        // Required for rtc_init() (base PICO SDK RTC)
+#include "pico/util/datetime.h"  // PICO SDK's Time/RTC utilities
 
 // FreeRTOS includes
 #include "FreeRTOS.h"
@@ -51,7 +55,6 @@
 #define LED_BLUE_PIN    12 
 
 #define BLINK_INTERVAL_MS 500  // 500ms interval for blinking
-
 
 // --- Global Variable Definitions (Defined here, declared 'extern' in main.h) ---
 FATFS fs; 
@@ -91,6 +94,12 @@ void vDisplayUpdaterTask(void *pvParameters);
 void vWifiConnectTask(void *pvParameters);
 extern void vMqttPublisherTask(void *pvParameters); 
 
+// --- Logging Prototypes with External Timestamp ---
+void get_timestamp(char* buffer, size_t size);
+extern void log_event(const char* event_type, const char* message, const char* external_timestamp);
+extern void log_access_event(const char* uid, const char* status, const char* external_timestamp);
+extern void log_pir_event(const char* status, const char* external_timestamp);
+
 
 // --- Helper Functions Implementation ---
 
@@ -98,9 +107,9 @@ extern void vMqttPublisherTask(void *pvParameters);
  * @brief Controls the onboard RGB LED color.
  */
 void set_rgb_color(int r, int g, int b) {
-    gpio_put(LED_RED_PIN, r);     // 1 = LED on, 0 = LED off
-    gpio_put(LED_GREEN_PIN, g);   // Straightforward logic, like in the old code.
-    gpio_put(LED_BLUE_PIN, b);    // No inversion
+    gpio_put(LED_RED_PIN, r);     
+    gpio_put(LED_GREEN_PIN, g);   
+    gpio_put(LED_BLUE_PIN, b);    
 }
 
 /**
@@ -148,6 +157,9 @@ void init_peripherals() {
     // Initialize I2C and UART
     initialize_uart();
     initialize_i2c();
+    
+    // Initialize PICO SDK's internal RTC (for basic time functions)
+    rtc_init(); 
 }
 
 /**
@@ -158,16 +170,16 @@ void initialize_sd(void) {
 
     if (xSemaphoreTake(xStateMutex, portMAX_DELAY) == pdTRUE) {
         if (fr == FR_OK) {
-            printf("SD Card: Sistema de arquivos montado com sucesso.\n");
+            printf("SD Card: Filesystem mounted successfully.\n");
             
-            // Tenta criar um log inicial
-            log_event("SYSTEM", "Sistema inicializado");
+            // Try to create an initial log
+            log_event("SYSTEM", "System initialized", "1970-01-01 00:00:00"); // Use fallback TS for init
             
             if (strcmp(current_status, "SYSTEM INIT") == 0) {
                 strcpy(current_status, "SYSTEM READY");
             }
         } else {
-            printf("SD Card: Falha ao montar sistema de arquivos. Erro: %d\n", fr);
+            printf("SD Card: Failed to mount filesystem. Error: %d\n", fr);
             strcpy(current_status, "SD CARD ERROR");
             set_rgb_color(1, 0, 0);
         }
@@ -176,21 +188,34 @@ void initialize_sd(void) {
 }
 
 /**
- * @brief Função helper para obter timestamp
+ * @brief Function helper to get timestamp (Now uses PICO SDK's internal time)
+ * NOTE: This function is primarily a fallback and should be replaced by external_timestamp.
  */
 void get_timestamp(char* buffer, size_t size) {
     time_t now;
     time(&now);
-    strftime(buffer, size, "%Y-%m-%d %H:%M:%S", localtime(&now));
+    // This will return 1970-01-01 if NTP/RTC is not set on the Pico W
+    strftime(buffer, size, "%Y-%m-%d %H:%M:%S", localtime(&now)); 
 }
 
+
 /**
- * @brief Records data in the log file (ACCESS.LOG/PIR.LOG).
- * (Placeholder for actual logging logic)
+ * @brief Records data in the log file (system.log).
+ * @param external_timestamp: Timestamp received from the Arduino (e.g., "2025-11-18 21:31:34")
  */
-void log_event(const char* event_type, const char* message) {
-    char timestamp[32];
-    get_timestamp(timestamp, sizeof(timestamp));
+void log_event(const char* event_type, const char* message, const char* external_timestamp) {
+    
+    const char* ts_to_use;
+    char default_ts[32] = {0};
+    
+    // Use external timestamp if provided and valid (non-null and non-empty)
+    if (external_timestamp && external_timestamp[0] != '\0') {
+        ts_to_use = external_timestamp;
+    } else {
+        // Fallback: use the Pico W's internal time (which will be 1970-01-01 if no NTP)
+        get_timestamp(default_ts, sizeof(default_ts)); 
+        ts_to_use = default_ts;
+    }
     
     if (f_mount(&fs, "0:", 1) == FR_OK) {
         FRESULT fr;
@@ -199,33 +224,35 @@ void log_event(const char* event_type, const char* message) {
         fr = f_open(&file, "system.log", FA_WRITE | FA_OPEN_APPEND | FA_OPEN_ALWAYS);
         if (fr == FR_OK) {
             char log_line[256];
+            
+            // ➡️ CRITICAL FIX: Use the trusted timestamp from the Arduino Hub
             snprintf(log_line, sizeof(log_line), "[%s] %s: %s\n", 
-                    timestamp, event_type, message);
+                    ts_to_use, event_type, message);
             
             unsigned int bw;
             f_write(&file, log_line, strlen(log_line), &bw);
             f_sync(&file);
             f_close(&file);
             
-            printf("Log salvo: %s", log_line);
+            printf("Log saved: %s", log_line);
         } else {
-            printf("Erro ao abrir arquivo de log: %d\n", fr);
+            printf("Error opening log file: %d\n", fr);
         }
         
         f_mount(0, "0:", 0);
     } else {
-        printf("Erro ao montar sistema de arquivos\n");
+        printf("Error mounting filesystem\n");
     }
 }
 
-void log_access_event(const char* uid, const char* status) {
+void log_access_event(const char* uid, const char* status, const char* external_timestamp) {
     char message[100];
     snprintf(message, sizeof(message), "UID: %s - Status: %s", uid, status);
-    log_event("ACCESS", message);
+    log_event("ACCESS", message, external_timestamp);
 }
 
-void log_pir_event(const char* status) {
-    log_event("PIR", status);
+void log_pir_event(const char* status, const char* external_timestamp) {
+    log_event("PIR", status, external_timestamp);
 }
 
 bool is_uid_authorized(const char* uid) {
@@ -270,19 +297,19 @@ void update_tag_stats(const char* uid, bool success) {
         stats->last_read_time = current_time;
         
         // Print updated statistics.
-        printf("\n=== Estatísticas da Tag %s ===\n", uid);
-        printf("Tentativas totais: %lu\n", stats->read_attempts);
-        printf("Leituras com sucesso: %lu (%.1f%%)\n", 
+        printf("\n=== Tag Statistics %s ===\n", uid);
+        printf("Total attempts: %lu\n", stats->read_attempts);
+        printf("Successful reads: %lu (%.1f%%)\n", 
                stats->successful_reads,
                (float)stats->successful_reads * 100 / stats->read_attempts);
-        printf("Falhas consecutivas: %lu\n", stats->consecutive_fails);
+        printf("Consecutive failures: %lu\n", stats->consecutive_fails);
         printf("=============================\n\n");
     }
 }
 
 void toggle_blue_led(void) {
     led_blink_state = !led_blink_state;
-    set_rgb_color(0, 0, led_blink_state ? 1 : 0); // Lógica direta
+    set_rgb_color(0, 0, led_blink_state ? 1 : 0); 
 }
 
 /**
@@ -290,14 +317,13 @@ void toggle_blue_led(void) {
  */
 void vDisplayUpdaterTask(void *pvParameters) {
     (void) pvParameters;
-    const TickType_t xDisplayDelay = pdMS_TO_TICKS(100); // Mudado de 250 para 100ms
+    const TickType_t xDisplayDelay = pdMS_TO_TICKS(100); 
 
     // Get local references to font structures
     const SSD1306_Font_t font_small = Font_6x8;
     const SSD1306_Font_t font_large = Font_11x18; 
 
     // --- 1. OLED Initialization (Must acquire Mutex) ---
-    // Initialize I2C is done in init_peripherals(), but OLED init is done here 
     if (xSemaphoreTake(xOledMutex, portMAX_DELAY) == pdPASS) { 
         initialize_oled(); 
         xSemaphoreGive(xOledMutex);
@@ -333,7 +359,7 @@ void display_status(void) {
         local_pir_state[31] = '\0';
         
         // Adds debugging to the serial port.
-        printf("Status Atual: %s | UID: %s | PIR: %s\n", 
+        printf("Current Status: %s | UID: %s | PIR: %s\n", 
                local_status, local_uid, local_pir_state);
         
         xSemaphoreGive(xStateMutex);
@@ -407,7 +433,7 @@ void vUartReaderTask(void *pvParameters) {
     TickType_t xLastUidTime = 0;  // Stores when the last UID was read.
     bool uidPresent = false;      // Flag to check if a UID is present.
     
-    printf("UART_Reader: Task iniciada.\n");
+    printf("UART_Reader: Task started.\n");
 
     while (true) {
         // Check if it's time to clear the UID.
@@ -415,7 +441,7 @@ void vUartReaderTask(void *pvParameters) {
             if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
                 strcpy(current_uid, "NONE");
                 uidPresent = false;
-                printf("UID limpo após timeout\n");
+                printf("UID cleared after timeout\n");
                 xSemaphoreGive(xStateMutex);
             }
         }
@@ -431,82 +457,102 @@ void vUartReaderTask(void *pvParameters) {
             } 
             else if (rx_index > 0) {
                 rx_buffer[rx_index] = '\0';
-                printf("UART Recebido: %s\n", rx_buffer);
+                printf("UART Received: %s\n", rx_buffer);
+                
+                // --- Start Parsing ---
+                // Expected format from Arduino: [YYYY-MM-DD HH:MM:SS] EVENT_STATUS:DATA
+                
+                char timestamp_buffer[32] = {0}; // Buffer to hold extracted TS
+                char event_buffer[200] = {0};    // Buffer to hold the event data (excluding TS)
+                char *ts_start = strchr(rx_buffer, '[');
+                char *ts_end = strchr(rx_buffer, ']');
+                char *event_data = NULL; // Pointer to the actual event data start
                 
                 if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-                    if (strstr(rx_buffer, "PIR_STATUS:MOTION_DETECTED")) {
-                        strcpy(current_pir_status, "MOTION DETECTED");
-                        toggle_blue_led();  // Starts blinking
-                        log_pir_event("MOTION DETECTED");
-
-                        // Send MQTT message for PIR motion detected
-                        MqttMessage_t mqtt_msg;
-                        strcpy(mqtt_msg.type, "PIR");
-                        strcpy(mqtt_msg.uid, "");
-                        strcpy(mqtt_msg.status, "MOTION_DETECTED");
-                        xQueueSend(xMqttQueue, &mqtt_msg, pdMS_TO_TICKS(100));
+                    
+                    // 1. Extract the Timestamp (between [ and ])
+                    if (ts_start && ts_end && ts_end > ts_start) {
+                        int ts_len = ts_end - ts_start - 1;
+                        if (ts_len > 0 && ts_len < sizeof(timestamp_buffer)) {
+                            // Copy the timestamp itself (e.g., "2025-11-18 21:31:34")
+                            strncpy(timestamp_buffer, ts_start + 1, ts_len);
+                            timestamp_buffer[ts_len] = '\0';
+                        }
+                        // The actual event data starts 2 characters after ']' (']' + space)
+                        event_data = ts_end + 2; 
+                    } else {
+                        // Fallback: If no timestamp bracket is found, assume the whole buffer is the event
+                        event_data = rx_buffer; 
                     }
-                    else if (strstr(rx_buffer, "PIR_STATUS:NO_MOTION")) {
-                        strcpy(current_pir_status, "NO MOTION");
-                        set_rgb_color(0, 0, 0);  // Turn off all LEDs.
-                        log_pir_event("NO MOTION");
+                    
+                    // 2. Process Events (using event_data)
+                    if (event_data && event_data[0] != '\0') {
+                        
+                        if (strstr(event_data, "PIR_STATUS:MOTION_DETECTED_RFID_ACTIVATED")) {
+                            strcpy(current_pir_status, "MOTION DETECTED");
+                            toggle_blue_led();
+                            // Log event with external timestamp
+                            log_pir_event("MOTION DETECTED (RFID Activated)", timestamp_buffer);
+                            // Send MQTT message
+                            MqttMessage_t mqtt_msg;
+                            strcpy(mqtt_msg.type, "PIR");
+                            strcpy(mqtt_msg.uid, "");
+                            strcpy(mqtt_msg.status, "MOTION DETECTED (RFID ON)");
+                            xQueueSend(xMqttQueue, &mqtt_msg, 0);
 
-                        // Send MQTT message for PIR no motion
-                        MqttMessage_t mqtt_msg;
-                        strcpy(mqtt_msg.type, "PIR");
-                        strcpy(mqtt_msg.uid, "");
-                        strcpy(mqtt_msg.status, "NO_MOTION");
-                        xQueueSend(xMqttQueue, &mqtt_msg, pdMS_TO_TICKS(100));
-                    }
-                    else if (strstr(rx_buffer, "UID:")) {
-                        char *uid_start = strstr(rx_buffer, "UID:") + 4;
-                        while (*uid_start == ' ') uid_start++;
+                        } else if (strstr(event_data, "PIR_STATUS:NO_MOTION_RFID_SLEEP")) {
+                            strcpy(current_pir_status, "NO MOTION");
+                            set_rgb_color(0, 0, 0);
+                            log_pir_event("NO MOTION (RFID Sleep)", timestamp_buffer);
+                            // Send MQTT message
+                            MqttMessage_t mqtt_msg;
+                            strcpy(mqtt_msg.type, "PIR");
+                            strcpy(mqtt_msg.uid, "");
+                            strcpy(mqtt_msg.status, "NO MOTION (RFID Sleep)");
+                            xQueueSend(xMqttQueue, &mqtt_msg, 0);
 
-                        // Check if enough time has passed since the last reading.
-                        bool read_allowed = true;
-                        for(int i = 0; i < num_tags_tracked; i++) {
-                            if(strcmp(uid_start, tag_history[i].uid) == 0) {
-                                TickType_t time_since_last = xTaskGetTickCount() - tag_history[i].last_read_time;
-                                if(time_since_last < pdMS_TO_TICKS(TAG_READ_TIMEOUT_MS)) {
-                                    read_allowed = false;
-                                    break;
+                        } else if (strstr(event_data, "PIR_STATUS:MOTION_DETECTED")) {
+                            strcpy(current_pir_status, "MOTION DETECTED");
+                            toggle_blue_led();
+
+                        } else if (strstr(event_data, "RFID_UID:")) {
+                            // UID Logic
+                            char uid_buffer[16];
+                            // Find the UID value right after "UID:"
+                            if (sscanf(event_data, "RFID_UID:%15s", uid_buffer) == 1) {
+
+                                bool read_allowed = true; // Placeholder for statistical throttling
+
+                                if(read_allowed) {
+                                    strncpy(current_uid, uid_buffer, 15);
+                                    current_uid[15] = '\0';
+                                    xLastUidTime = xTaskGetTickCount();
+                                    uidPresent = true;
+
+                                    // Checks if the tag is authorized and configures the appropriate LED.
+                                    bool authorized = is_uid_authorized(current_uid);
+                                    set_rgb_color(authorized ? 0 : 1, authorized ? 1 : 0, 0);
+
+                                    // Add access log with external timestamp
+                                    log_access_event(current_uid,
+                                        authorized ? "AUTHORIZED" : "UNAUTHORIZED", timestamp_buffer);
+
+                                    // Update statistics and send MQTT message
+                                    update_tag_stats(current_uid, true);
+                                    // Send MQTT message
+                                    MqttMessage_t mqtt_msg;
+                                    strcpy(mqtt_msg.type, "ACCESS");
+                                    strcpy(mqtt_msg.uid, current_uid);
+                                    strcpy(mqtt_msg.status, authorized ? "AUTHORIZED" : "UNAUTHORIZED");
+                                    xQueueSend(xMqttQueue, &mqtt_msg, 0);
+
+                                    printf("New UID detected: %s\n", current_uid);
+                                } else {
+                                    // Throttled reading
+                                    update_tag_stats(uid_buffer, false);
+                                    printf("Reading ignored - too fast for the same tag\n");
                                 }
                             }
-                        }
-
-                        if(read_allowed) {
-                            strncpy(current_uid, uid_start, 15);
-                            current_uid[15] = '\0';
-                            xLastUidTime = xTaskGetTickCount();
-                            uidPresent = true;
-
-                            // Checks if the tag is authorized and configures the appropriate LED.
-                            bool authorized = is_uid_authorized(current_uid);
-                            if (authorized) {
-                                set_rgb_color(0, 1, 0);  // Green for authorized access
-                            } else {
-                                set_rgb_color(1, 0, 0);  // Red for access denied
-                            }
-
-                            // Add access log
-                            log_access_event(current_uid,
-                                is_uid_authorized(current_uid) ? "AUTHORIZED" : "UNAUTHORIZED");
-
-                            // Update statistics
-                            update_tag_stats(current_uid, true);
-
-                            // Send MQTT message for UID access
-                            MqttMessage_t mqtt_msg;
-                            strcpy(mqtt_msg.type, "ACCESS");
-                            strcpy(mqtt_msg.uid, current_uid);
-                            strcpy(mqtt_msg.status, authorized ? "AUTHORIZED" : "UNAUTHORIZED");
-                            xQueueSend(xMqttQueue, &mqtt_msg, pdMS_TO_TICKS(100));
-
-                            printf("Nova UID detectada: %s (será limpa em 3 segundos)\n", current_uid);
-                        } else {
-                            // Updates statistics as needed (very fast reading)
-                            update_tag_stats(uid_start, false);
-                            printf("Leitura ignorada - muito rápida para a mesma tag\n");
                         }
                     }
 
@@ -527,7 +573,7 @@ void vUartReaderTask(void *pvParameters) {
  */
 void vWifiConnectTask(void *pvParameters) {
     (void) pvParameters;
-    const TickType_t xWifiRetryDelay = pdMS_TO_TICKS(5000); // 5 segundos entre tentativas
+    const TickType_t xWifiRetryDelay = pdMS_TO_TICKS(5000); // 5 seconds between retries
     int retry_count = 0;
     bool mqtt_task_created = false;
     
@@ -536,7 +582,7 @@ void vWifiConnectTask(void *pvParameters) {
     while (true) {
         // Check status using cyw43_tcpip_link_status
         if (cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA) != CYW43_LINK_UP) {
-            printf("Wi-Fi_Connect: Tentativa %d de conexão Wi-Fi (SSID: %s)...\n", ++retry_count, WIFI_SSID);
+            printf("Wi-Fi_Connect: Attempt %d to connect Wi-Fi (SSID: %s)...\n", ++retry_count, WIFI_SSID);
             
             if (xSemaphoreTake(xStateMutex, portMAX_DELAY) == pdPASS) {
                 strcpy(current_status, "CONNECTING WIFI");
@@ -548,19 +594,19 @@ void vWifiConnectTask(void *pvParameters) {
             if (cyw43_arch_wifi_connect_timeout_ms(WIFI_SSID, WIFI_PASSWORD, 
                 CYW43_AUTH_WPA2_AES_PSK, 10000)) {
                 
-                printf("Wi-Fi_Connect: Falha na conexão.\n");
+                printf("Wi-Fi_Connect: Connection failed.\n");
                 if (xSemaphoreTake(xStateMutex, portMAX_DELAY) == pdPASS) {
                     strcpy(current_status, "WIFI CONNECT FAILED");
                     xSemaphoreGive(xStateMutex);
                 }
             } else {
-                printf("Wi-Fi_Connect: Conectado com sucesso!\n");
+                printf("Wi-Fi_Connect: Connected successfully!\n");
                 if (xSemaphoreTake(xStateMutex, portMAX_DELAY) == pdPASS) {
                     strcpy(current_status, "WIFI CONNECTED");
                     xSemaphoreGive(xStateMutex);
                 }
                 
-                // Cria a task MQTT apenas na primeira conexão bem-sucedida
+                // Create the MQTT task only on the first successful connection
                 if (!mqtt_task_created) {
                     xTaskCreate(vMqttPublisherTask, "MQTT_Publisher", 4096, NULL, 4, NULL);
                     mqtt_task_created = true;
@@ -605,10 +651,9 @@ int main() {
     printf("BitDogLab: Starting tasks...\n");
     
     // 5. Create Tasks
-    xTaskCreate(vUartReaderTask, "UART_Reader", 2048, NULL, 3, NULL); // Increased priority
+    xTaskCreate(vUartReaderTask, "UART_Reader", 2048, NULL, 3, NULL); 
     xTaskCreate(vDisplayUpdaterTask, "OLED_Updater", 1024, NULL, 1, NULL); 
     xTaskCreate(vWifiConnectTask, "WIFI_Connect", 2048, NULL, 2, NULL); 
-    // Note: vMqttPublisherTask is created inside vWifiConnectTask
     
     // 6. Start the FreeRTOS Scheduler
     vTaskStartScheduler();
