@@ -123,7 +123,7 @@ O projeto soluciona problemas clássicos de **travamento sequencial de rotinas (
 
 <img src=images/log-saved-microsd.jpg width="100%" alt="Log Salvo no Cartão SD">
 
-> 🎥 **Vídeo Demonstrativo do Funcionamento:** [Assistir no YouTube/Vídeo](https://youtube.com) *(Substitua pelo link real do seu vídeo)*
+> 🎥 **Vídeo Demonstrativo do Funcionamento:** [Assistir no YouTube/Vídeo](https://youtu.be/z97VpytiFT4)
 
 ---
 
